@@ -26,6 +26,7 @@
 #include "err.h"
 #include "hardware/irq.h"
 #include "hardware/uart.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include "ringbuffer.h"
 
@@ -206,8 +207,12 @@ uint32_t km_uart_available(uint8_t port) {
   if ((uart == NULL) || (__uart_status[port].enabled == false)) {
     return ENOPHRPL;
   }
-  __uart_fill_ringbuffer(uart, port);
-  return ringbuffer_length(&__uart_rx_ringbuffer[port]);
+
+  uint32_t intr = save_and_disable_interrupts();
+  uint32_t available = ringbuffer_length(&__uart_rx_ringbuffer[port]);
+  restore_interrupts(intr);
+
+  return available;
 }
 
 uint32_t km_uart_read(uint8_t port, uint8_t *buf, size_t len) {
@@ -215,11 +220,17 @@ uint32_t km_uart_read(uint8_t port, uint8_t *buf, size_t len) {
   if ((uart == NULL) || (__uart_status[port].enabled == false)) {
     return ENOPHRPL;
   }
+
+  uint32_t intr = save_and_disable_interrupts();
+  
   uint32_t n = ringbuffer_length(&__uart_rx_ringbuffer[port]);
   if (n > len) {
     n = len;
   }
   ringbuffer_read(&__uart_rx_ringbuffer[port], buf, n);
+
+  restore_interrupts(intr);
+
   return n;
 }
 
