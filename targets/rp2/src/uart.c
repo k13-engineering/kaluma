@@ -29,11 +29,13 @@
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include "ringbuffer.h"
+#include "system.h"
 
 static ringbuffer_t __uart_rx_ringbuffer[UART_NUM];
 static uint8_t *__read_buffer[UART_NUM];
 static struct __uart_status_s {
   bool enabled;
+  uint64_t millis_last_irq;
 } __uart_status[UART_NUM];
 
 static uart_inst_t *__get_uart_no(uint8_t bus) {
@@ -51,9 +53,17 @@ static uart_inst_t *__get_uart_no(uint8_t bus) {
  */
 
 static void __uart_fill_ringbuffer(uart_inst_t *uart, uint8_t port) {
+  int received_any = 0;
+
   while (uart_is_readable(uart)) {
     uint8_t ch = uart_getc(uart);
     ringbuffer_write(&__uart_rx_ringbuffer[port], &ch, sizeof(ch));
+
+    received_any = 1;
+  }
+
+  if (received_any) {
+    __uart_status[port].millis_last_irq = km_gettime();
   }
 }
 
@@ -190,6 +200,7 @@ int km_uart_setup(uint8_t port, uint32_t baudrate, uint8_t bits,
   }
   uart_set_irq_enables(uart, true, false);
   __uart_status[port].enabled = true;
+  __uart_status[port].millis_last_irq = km_gettime();
   return 0;
 }
 
@@ -208,8 +219,29 @@ uint32_t km_uart_available(uint8_t port) {
     return ENOPHRPL;
   }
 
+  uint32_t available = 0;
+
+  uint64_t DEBOUNCE_TIME_MS = 5;
+  uint32_t DEBOUNCE_MAX_BYTES = 256;
+
   uint32_t intr = save_and_disable_interrupts();
-  uint32_t available = ringbuffer_length(&__uart_rx_ringbuffer[port]);
+
+  // interrupt will only be triggered on certain FIFO levels
+  // make sure we don't miss single bytes
+  __uart_fill_ringbuffer(uart, port);
+
+  // km_gettime() must be called after __uart_fill_ringbuffer(), otherwise
+  // the time diff might be negative
+  uint64_t now = km_gettime();
+  uint64_t time_since_last_interrupt = now - __uart_status[port].millis_last_irq;
+
+  available = ringbuffer_length(&__uart_rx_ringbuffer[port]);
+
+  if (time_since_last_interrupt < DEBOUNCE_TIME_MS && available < DEBOUNCE_MAX_BYTES) {
+    // if data is still arriving and we are below the debounce limit, report nothing available
+    available = 0;
+  }
+
   restore_interrupts(intr);
 
   return available;
